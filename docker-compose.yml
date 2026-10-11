@@ -1,0 +1,50 @@
+services:
+  airflow-metadata:
+    image: postgres:16
+    container_name: ecommerce_airflow_metadata
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_metadata_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  airflow:
+    build: .
+    image: ecommerce-etl-airflow:2.9.3
+    container_name: ecommerce_airflow
+    restart: unless-stopped
+    depends_on:
+      airflow-metadata:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-metadata:5432/airflow
+      AIRFLOW_CONN_POSTGRES_BIZ: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5433/ecommerce
+      AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./sql:/opt/airflow/sql
+      - ./data:/opt/airflow/data
+      - ./logs:/opt/airflow/logs
+      - ./tests:/opt/airflow/tests
+    command: >
+      bash -c "airflow db migrate &&
+               (airflow scheduler & airflow webserver)"
+
+volumes:
+  airflow_metadata_data:
