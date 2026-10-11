@@ -143,7 +143,20 @@ Proven inside a **real DagRun** (not `dags test`, which never advances retries).
 
 Attempt-by-attempt logs are in the repo (`git`-visible, `logs/` is gitignored): `logs/dag_id=ecommerce_etl_pipeline/run_id=backfill__2016-09-05…/task_id=extract_sales_csv/attempt=1.log` and `attempt=2.log`.
 
-> **Screenshots needed for the README:** (a) Airflow UI grid of run `backfill__2016-09-05` showing the successful run, (b) the `extract_sales_csv` task log tab with the attempt selector showing attempt 1 (`FileNotFoundError` → `UP_FOR_RETRY`) and attempt 2 (`SUCCESS`).
+![Grid view of the successful backfill run](docs/screenshots/grid_success.png)
+*Grid view: run `backfill__2016-09-05T00:00:00+00:00` ended `success` at 05:55:42 UTC with all 7 tasks green (run duration 00:06:09).*
+
+![Attempt 1 log start of extract_sales_csv](docs/screenshots/retry_attempt1_start.png)
+*Attempt 1 log of `extract_sales_csv`: `Starting attempt 1 of 3` at 05:49:37 UTC while `2016-09-05.csv` was renamed away, followed by the task failing with an exception.*
+
+![Attempt 1 log failure of extract_sales_csv](docs/screenshots/retry_attempt1_fail.png)
+*Attempt 1 log (tail): `FileNotFoundError: missing incoming CSV` followed by `Marking task as UP_FOR_RETRY` at 05:49:38 UTC.*
+
+![Task Instance Details showing Try Number 2](docs/screenshots/try_number_2.png)
+*Task Instance Details for `extract_sales_csv` in the same run: status `success` with `Try Number 2`, proving the retry recovered.*
+
+![Attempt 2 log success of extract_sales_csv](docs/screenshots/retry_attempt2.png)
+*Attempt 2 log: the task restarted at 05:54:48 UTC after the CSV was restored, read `2016-09-05.csv`, and was marked `SUCCESS`.*
 
 ## Decisions and deviations
 
