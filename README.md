@@ -131,14 +131,19 @@ Verified: the 7-day window `2017-10-01…2017-10-07` was executed **twice**; all
 
 ## Deliberate failure demonstration (blueprint §13)
 
-Two failures were forced deliberately:
+Proven inside a **real DagRun** (not `dags test`, which never advances retries). The DAG stays paused; the run was executed as a single-day backfill window.
 
-1. **Incoming CSV temporarily renamed** (`2016-09-05.csv` → `.bak`): `extract_sales_csv` raised `FileNotFoundError` (exit 1) and, at gate level, `data_quality_check` failed with `['freshness_missing_incoming_file']`. The file was then restored and verified.
-2. **Empty day before the freshness fix**: `data_quality_check` raised `AirflowException: data quality gate failed: ['freshness_raw_missing']`, the task went **`up_for_retry`** (retries = 2, delay = 5 min), `notify_success` never executed and the DagRun did not succeed.
+- **Run:** `backfill__2016-09-05T00:00:00+00:00`, day `2016-09-05` (a day with data), command `airflow dags backfill -s 2016-09-05 -e 2016-09-05 ecommerce_etl_pipeline`.
+- **What was forced:** the incoming file was renamed to `2016-09-05.csv.bak` before the run, so the file for the logical date was missing.
+- **Attempt 1** (05:49:37 UTC): `extract_sales_csv` raised `FileNotFoundError: missing incoming CSV: …/data/incoming/sales/2016-09-05.csv`; Airflow marked the task `UP_FOR_RETRY` at 05:49:38 and recorded the failure in `task_fail`. The parallel `extract_holidays_api` task succeeded; all downstream tasks waited.
+- **Recovery:** the CSV was restored during the 5-minute retry window (file re-verified: header + 1 data row, 2 lines).
+- **Attempt 2** (05:54:48 UTC, exactly one `retry_delay` after attempt 1): `extract_sales_csv` succeeded and read `2016-09-05.csv`.
+- **Final state:** `load_raw` → `clean_and_validate_staging` → `upsert_production` → `data_quality_check` → `notify_success` all succeeded at attempt 1; **DagRun state `success`**, 7/7 tasks succeeded, run duration 369.86 s, final `try_number` of `extract_sales_csv` = **2**.
+- **No side effects:** Project 1 protected counts unchanged after the run — orders 99441, order_items 112650, payments 103886, reviews 99224 (the day's single order already existed; raw/staging each hold 1 row for `2016-09-05`).
 
-Airflow's retry settings (`retries=2`, `retry_delay=5min`) apply to every task, so a transient file/API failure is retried before the run is finally marked failed.
+Attempt-by-attempt logs are in the repo (`git`-visible, `logs/` is gitignored): `logs/dag_id=ecommerce_etl_pipeline/run_id=backfill__2016-09-05…/task_id=extract_sales_csv/attempt=1.log` and `attempt=2.log`.
 
-> **Screenshots needed for the README:** (a) Airflow UI grid/log of a successful run, (b) the retry history of the forced failure above. They are taken in the UI at `http://localhost:8080` and dropped into this section.
+> **Screenshots needed for the README:** (a) Airflow UI grid of run `backfill__2016-09-05` showing the successful run, (b) the `extract_sales_csv` task log tab with the attempt selector showing attempt 1 (`FileNotFoundError` → `UP_FOR_RETRY`) and attempt 2 (`SUCCESS`).
 
 ## Decisions and deviations
 
