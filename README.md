@@ -8,19 +8,21 @@ Part of a three-repo portfolio:
 |---|------|-------|
 | 1 | [ecommerce-database-design](https://github.com/Ali-Ahmed-Farag/ecommerce-database-design) | PostgreSQL design + one-time historical seed for Olist (orders, items, payments, reviews, customers…) |
 | 2 | **this repo** | Airflow ETL pipeline (CSV + API) that upserts into Project 1's `production` schema |
-| 3 | *analytics / Power BI* | Star schema, `fact_sales` materialized view, dashboard — **not built yet** |
+| 3 | **ecommerce-sales-dashboard** | Star schema, `fact_sales` materialized view, Power BI manual pack (repo URL to be added) |
 
 ## Scope boundary (read this first)
 
-This repository's DAG currently ends at:
+This repository's DAG runs the full chain (9 tasks):
 
 ```
 extract_sales_csv ─┐
-                   ├─> load_raw ─> clean_and_validate_staging ─> upsert_production ─> data_quality_check ─> notify_success
+                   ├─> load_raw ─> clean_and_validate_staging ─> upsert_production ─> load_dimension_tables ─> refresh_fact_materialized_view ─> data_quality_check ─> notify_success
 extract_holidays_api ┘
 ```
 
-It does **not** yet contain `load_dimension_tables` or `refresh_fact_materialized_view` (Project 3's tasks), and `data_quality_check` only runs Project 2 checks (staging validation, freshness, staging-vs-production row counts, referential checks) — specifically **not** the blueprint's delivery-consistency check or the `fact_sales`-vs-`production.order_items` row-count check, which both need Project 3 objects. The blueprint's full chain will be completed by Project 3. This truncation is deliberate and documented in [`docs/decisions.md`](docs/decisions.md) (item 5).
+Project 3's `analytics` schema (dimension tables + `fact_sales` materialized view, SQL lives in the `ecommerce-sales-dashboard` repo) is refreshed by the `load_dimension_tables` → `refresh_fact_materialized_view` tasks, and `data_quality_check` additionally runs the Project 3 checks (delivery-consistency, absolute `fact_sales`-vs-`production.order_items` row count, surrogate-key and date-key referential checks). The earlier truncation is superseded — see [`docs/decisions.md`](docs/decisions.md) (item 5, marked superseded).
+
+The analytics SQL is mounted read-only into the Airflow container from `../ecommerce-sales-dashboard/sql`, so that repo must sit next to this one (path configurable via `ANALYTICS_SQL_DIR`). If the mount is missing, `load_dimension_tables` fails with `FileNotFoundError` and the downstream tasks never run (proven by test).
 
 ## Architecture
 
@@ -36,11 +38,13 @@ It does **not** yet contain `load_dimension_tables` or `refresh_fact_materialize
 │  national holidays, cached   │        │ production.orders / order_items / holidays   │
 │  per logical year            │        │ (Project 1 tables, UPSERTed)                 │
 └──────────────────────────────┘        └──────────────────────────────────────────────┘
-                                                    ▲
-                       Apache Airflow 2.9.3 (single container, LocalExecutor)
-                       own metadata DB: airflow_metadata (never the business DB)
-                       UI: http://localhost:8080
+                                                     ▲
+                        Apache Airflow 2.9.3 (single container, LocalExecutor)
+                        own metadata DB: airflow_metadata (never the business DB)
+                        UI: http://localhost:8080
 ```
+
+The DAG additionally refreshes Project 3's `analytics` schema after `upsert_production` (dimension upserts, then `REFRESH MATERIALIZED VIEW analytics.fact_sales`); see Scope boundary.
 
 **Layering rationale:** `raw` is a faithful, immutable-per-partition landing copy (delete-then-insert per `load_date`) so a bad transform never loses source data; `staging` is recomputed from raw every run (cleaning, typing, dedup, holiday flags) so logic changes can be replayed; `production` receives only UPSERTs of already-validated rows keyed on Project 1's natural keys.
 
@@ -50,19 +54,19 @@ A second source only earns its place if it **changes the meaning of the primary 
 
 ## Tech stack
 
-Python 3.11, pandas 2.2.2, requests, psycopg2, python-dotenv, Apache Airflow **2.9.3** (pinned, never `latest`), PostgreSQL 18 (Docker, host port 5433), Docker Compose, pytest.
+Python 3.11, pandas 2.2.2, requests, psycopg2, python-dotenv, Apache Airflow **2.9.3** (pinned, never `latest`), PostgreSQL 16 (Docker, host port 5433), Docker Compose, pytest.
 
 ## Repository layout
 
 ```text
 ecommerce-etl-pipeline/
-├── dags/ecommerce_etl_pipeline.py     # TaskFlow DAG: 7 tasks, retries=2 / 5 min
+├── dags/ecommerce_etl_pipeline.py     # TaskFlow DAG: 9 tasks, retries=2 / 5 min
 ├── src/
 │   ├── extract/   extract_csv.py, extract_holidays.py
 │   ├── transform/ clean_and_merge.py
-│   ├── load/      load_raw.py, load_staging.py, upsert_production.py
-│   └── quality/   data_quality_checks.py
-├── tests/         test_transform.py (26 unit tests)
+│   ├── load/      load_raw.py, load_staging.py, upsert_production.py, load_analytics.py
+│   └── quality/   data_quality_checks.py   (Project 2 + Project 3 checks)
+├── tests/         test_transform.py (26 unit tests) + test_analytics.py (11 unit tests)
 ├── sql/           create_schemas_and_tables.sql
 ├── scripts/       generate_incoming_csvs.py   (one-time CSV generation)
 ├── data/incoming/sales/                         (gitignored)
@@ -97,10 +101,11 @@ docker exec ecommerce_airflow bash -c "cd /opt/airflow/tests && python -m pytest
 
 ## Data quality gate
 
-`data_quality_check` runs **after** the upsert and before `notify_success` — if it fails, the run fails; no partial or silent success is possible.
+`data_quality_check` runs **after** the fact refresh and before `notify_success` — if it fails, the run fails; no partial or silent success is possible.
 
 - **Staging:** required-field nulls, allowed `order_status` values, `price > 0` on item rows, duplicate detection on `(order_id, order_item_seq, load_date)`, complete item fields.
 - **Post-production:** staging-vs-production row counts (orders and items), referential checks (customer/product/seller must exist in Project 1's reference tables), and freshness.
+- **Analytics (Project 3):** delivery-consistency (`order_delivered_date_key IS NULL` implies NULL delivery columns and NULL `is_late`), absolute `fact_sales` row count equals `production.order_items`, every surrogate key and every non-NULL date key in `fact_sales` exists in its dimension (purchase/estimated keys additionally never NULL).
 - **Freshness distinguishes three cases** (this is a documented deviation, see [`docs/decisions.md`](docs/decisions.md) item 7):
 
 | Incoming CSV for the logical date | raw rows | Result |
@@ -117,10 +122,14 @@ docker exec ecommerce_airflow bash -c "cd /opt/airflow/tests && python -m pytest
 | staging | rebuilt from that day's raw partition every run | no accumulation |
 | production | `INSERT … ON CONFLICT DO UPDATE` on natural keys | converges to the same end state |
 | holidays | logical-year guard + unique index `(holiday_date, COALESCE(state,'__NATIONAL__'))` | no repeat API calls, no duplicate rows |
+| dimensions | `INSERT … ON CONFLICT` on natural keys, key column never updated | same surrogate keys (checksums identical across reruns) |
+| fact_sales | full `REFRESH MATERIALIZED VIEW` each run | recomputed end state (order-independent checksum identical) |
 
 Verified: the 7-day window `2017-10-01…2017-10-07` was executed **twice**; all per-day staging checksums were byte-identical between runs, and `production` counts did not move.
 
 ## Verified end-to-end results
+
+The figures up to the full backfill were executed with the 7-task DAG (before Project 3 integration); the 2017-01-01…2017-01-07 window was later re-executed with the 9-task DAG (7/7 runs, **63 of 63 tasks succeeded, 0 failed**, twice more including a `--reset-dagruns` re-run with identical per-layer checksums).
 
 - Backfill `2017-10-01…2017-10-07`: 7/7 runs, **49/49 tasks succeeded, 0 failed** (twice — idempotency proof).
 - Backfill `2017-01-01…2017-01-07` (4 empty days + 3 data days): 7/7 runs, **49/49 succeeded, 0 failed**; empty days land 0 rows, data days land 32/4/5 rows.
@@ -129,6 +138,7 @@ Verified: the 7-day window `2017-10-01…2017-10-07` was executed **twice**; all
 - Protected Project 1 counts unchanged after every run: `orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`; `production.holidays = 26` after those windows (2016 + 2017, both legitimately loaded; 39 after the full backfill below, with 2018 added).
 - The DAG's metadata lives in a **separate** database (`airflow_metadata` container), never in the business database. That metadata database uses the default `airflow`/`airflow` credentials, which are local-dev only.
 - Full backfill `2016-01-01…2018-12-31` (`airflow dags backfill -s 2016-01-01 -e 2018-12-31 ecommerce_etl_pipeline`): **1096 of 1096 runs success, 7672 tasks succeeded, 0 failed**, wall-clock 1 h 19 min 10 s; raw and staging hold **113,425 rows each**; `production.holidays = 39` (13 per year 2016–2018, `state` NULL on all 39); protected counts unchanged (`orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`); DAG stayed paused; pre-existing successful runs were reused, no duplicates (1,096 runs / 1,096 distinct dates).
+- Run history (`dag_run` table): 1,096 rows for 1,096 distinct dates, all `success` — 1,094 with run_type `backfill` and 2 with run_type `manual`; by run_id prefix 1,091 `backfill__` + 5 `manual__` (manual runs come from `dags test`, which deletes any same-date run first; `--reset-dagruns` backfills adopt same-date manual runs instead of duplicating them). The forced-failure evidence run `backfill__2016-09-05T00:00:00+00:00` is intact with `extract_sales_csv` at `try_number` 2.
 
 ## Deliberate failure demonstration (blueprint §13)
 
@@ -161,4 +171,4 @@ The raw attempt logs live in the local `logs/` folder (gitignored, not pushed): 
 
 ## Decisions and deviations
 
-Every deviation from the blueprint — staging row identity, nullable item columns, holiday source union, image tag, DAG truncation, the `ds`-vs-`data_interval_start` year bug, and the empty-day rule — is written down with its evidence in [`docs/decisions.md`](docs/decisions.md).
+Every deviation from the blueprint — staging row identity, nullable item columns, holiday source union, image tag, DAG truncation (item 5, now superseded by the 9-task DAG), the `ds`-vs-`data_interval_start` year bug, the empty-day rule, the analytics mount and tasks, the Project 3 quality checks, and the `dags test` / `--reset-dagruns` run-handling findings — is written down with its evidence in [`docs/decisions.md`](docs/decisions.md).

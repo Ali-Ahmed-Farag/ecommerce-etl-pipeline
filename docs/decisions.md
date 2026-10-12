@@ -84,7 +84,7 @@ order_purchase_timestamp  is_national_holiday  is_holiday_week
 Successfully installed ... pandas-2.2.2 ... pytest-8.2.2 ... requests-2.32.3
 ```
 
-## 5. DAG intentionally truncated until Project 3
+## 5. DAG intentionally truncated until Project 3 (SUPERSEDED)
 
 **Blueprint said:** Full chain ends with `load_dimension_tables` → `refresh_fact_materialized_view` → `data_quality_check` → `notify_success`, where `data_quality_check` includes delivery-consistency and `fact_sales`-vs-`production.order_items` checks (Project 2 §13, Project 3 §14).
 
@@ -93,6 +93,8 @@ Successfully installed ... pandas-2.2.2 ... pytest-8.2.2 ... requests-2.32.3
 **Reason:** Project 3 (analytics schema, dimensions, `fact_sales` materialized view) is out of scope for this repository's current milestone. The README will state this truncation honestly.
 
 **Evidence:** Stage decision fixed before Stage 4 DAG authoring; Project 3 objects do not exist in this database (`analytics` schema not created in Stage 1 DDL).
+
+**Status:** SUPERSEDED by Project 3 integration — the DAG now runs the full 9-task chain (see items 8–10). The text above is kept as the historical record.
 
 ## 6. Holiday logical year derived from `ds`, not `data_interval_start`
 
@@ -167,4 +169,86 @@ finished run 7 of 7 | succeeded: 49 | failed: 0
 
  orders | order_items | payments | reviews | holidays
   99441 |      112650 |   103886 |   99224 |       26   (all unchanged)
+```
+
+## 8. Analytics SQL mounted read-only from the Project 3 repo
+
+**Blueprint said:** The analytics SQL lives in the Project 3 repo; the DAG runs in the Project 2 container (implementation decision: mount, not copy).
+
+**What we do:** `docker-compose.yml` mounts `../ecommerce-sales-dashboard/sql` at `/opt/airflow/analytics_sql:ro` with path override `ANALYTICS_SQL_DIR` (default `/opt/airflow/analytics_sql`, also in `.env.example` as a placeholder). The Project 3 repo must sit next to this one.
+
+**Evidence (Stage 3, recreate of only the airflow service):**
+```
+BEFORE: airflow Up 27 hours | metadata Up 27 hours | postgres Up 2 weeks ; runs 1096 ; paused t
+AFTER: airflow Up <1s (recreated) | metadata Up 27 hours | postgres Up 2 weeks ; runs 1096 ; paused t
+mount lists all 4 SQL files ; printenv → /opt/airflow/analytics_sql
+```
+A missing mount fails exactly like a missing SQL file: `FileNotFoundError: [Errno 2] No such file or directory: '/opt/airflow/analytics_sql/load_dimension_tables.sql'` (proven by test, Stage 4 ordering proof).
+
+## 9. Dimension load and fact refresh tasks in the DAG
+
+**Blueprint said:** `load_dimension_tables` → `refresh_fact_materialized_view` between `upsert_production` and `data_quality_check`, two tasks, retries=2 / 5 min each (Project 2 §13, Project 3 §4/§13).
+
+**What we do:** Exactly that, in TaskFlow style (`src/load/load_analytics.py`: whole-file single transaction, counts + durations logged and returned; SQL directory from the environment).
+
+**Evidence (Stage 4, DagBag inspect):**
+```
+import_errors: {} ; catchup False ; paused_at_creation True ; task_count: 9
+all 9 tasks: retries 2, delay 0:05:00 ; edges extracts→load_raw→staging→upsert→dims→fact→dq→notify
+dags test 2017-01-05: dims {'seconds': 0.7, counts 860/99441/32951/3095} ; refresh {'fact_rows': 112650, 'seconds': 1.0} ; 9/9 success
+window 2017-01-01…07 with 9-task DAG: finished run 7 of 7 | succeeded: 63 | failed: 0 (twice; checksums identical)
+```
+
+## 10. Project 3 quality checks in data_quality_check
+
+**Blueprint said:** Delivery-consistency, absolute `fact_sales` = `production.order_items`, surrogate referential checks (Project 3 §14).
+
+**What we do:** `run_analytics_checks(conn, schema="analytics")`: (a) `order_delivered_date_key IS NULL` implies NULL delivery columns and NULL `is_late`; (b) absolute row-count equality; (c) every customer/product/seller key and every non-NULL date key exists in its dimension, plus purchase/estimated keys never NULL (only delivered may be). The relative "stable or growing" check is NOT implemented (needs persisted state the Blueprint does not define). The schema parameter targets scratch copies for failure proofs.
+
+**Evidence (Stage 3–4):**
+```
+real analytics → [] ; 26 pre-existing unit tests still pass (37 total with new tests)
+scratch corruptions → ['analytics_delivery_consistency:2', 'analytics_fact_vs_order_items:112649!=112650', 'analytics_orphan_fact_customer_key:1', 'analytics_null_purchase_date_key:1', 'analytics_null_estimated_date_key:1'] plus the 3 date-key orphan errors on a second copy
+git diff: 70 insertions(+), 0 deletions (pre-existing checks byte-untouched)
+standalone gate call → AirflowException: data quality gate failed: ['analytics_orphan_fact_customer_key:1']
+```
+
+## 11. dags test and backfill run-handling findings (Airflow 2.9.3)
+
+**Found, not designed:** three behaviors with query evidence, no guessing on causes.
+
+(a) `dags test` never increments `try_number`, but retries still fire on schedule: `load_dimension_tables` shows 3 `task_fail` rows at 07:03:56 / 07:08:57 / 07:13:57 (exactly the 5-minute `retry_delay`) followed by success, while its task_instance reads `try_number 0, max_tries 2` with zero `task_reschedule` rows. The limit the counter enforces is therefore never reached under `dags test`.
+
+(b) `dags test <date>` deletes any existing same-date DagRun before creating `manual__`: dates 2017-01-05/06/07 now hold only their `manual__` rows (no `backfill__` rows).
+
+(c) `--reset-dagruns -y` deletes in-range backfill runs, recreates them, and adopts same-date manual runs (type flips to `backfill`, tasks re-executed): `manual__2017-01-05` now reads run_type `backfill`, success. `--help` documents `-y/--yes` ("Do not prompt to confirm") and the deletion behavior. A reset refused against a RUNNING manual run writes nothing (9 ms job, error only): `Backfill cannot be created … as there's already manual in a RUNNING state`.
+
+**Evidence (Stage 4):**
+```
+run_type/state: backfill success 1094, manual success 2 ; prefixes backfill__ 1091 + manual__ 5 ; distinct dates 1096
+window 2017-01-01…07: 6× backfill__ success + manual__2017-01-05 (backfill) + manual__2017-01-06/07 (manual)
+evidence run backfill__2016-09-05 success, extract_sales_csv try_number 2 (untouched)
+```
+
+## 12. FMDay, IS DISTINCT FROM, and sequence consumption
+
+**Blueprint said:** `TO_CHAR(d, 'Day')`; `ON CONFLICT … DO UPDATE` (Project 3 §10–11).
+
+**What we do (Project 3 SQL, depended on by this repo's tasks):** `FMDay` (no padding; `padded_day_names 0`) and `WHERE … IS DISTINCT FROM …` (tampered row alone rewritten: `INSERT 0 1`, attribute reverted, key kept, checksum unchanged). `ON CONFLICT` consumes sequence values even for conflicting rows: +860/+99,441/+32,951/+3,095 per load run, measured.
+
+## 13. Window re-execution method and dry-run limit
+
+**What we do:** Re-execute dates with `airflow dags backfill -s <start> -e <end> --reset-dagruns -y ecommerce_etl_pipeline` (exact command; `-y` per `--help`). `backfill -n/--dry-run` renders the date and XCom-free tasks but aborts at the first XCom-dependent task (`ValueError: Exactly one of run_id or execution_date must be passed`) — a dry-run limitation, not a DAG defect.
+
+## 14. Relative row-count check not implemented
+
+Carried over from Project 3 scope: the "stable or growing versus previous run" check needs persisted state the Blueprint does not define. The absolute check covers the grain guarantee (112650 = 112650).
+
+## 15. Read-only analyst role powerbi_reader
+
+The Project 3 repo's `create_powerbi_role.sql` creates the role this pipeline's objects are read through: LOGIN, USAGE on `analytics`, SELECT on its tables, default privileges, nothing elsewhere. Detail and evidence live in that repo's decisions; the grant proof here:
+
+```
+SELECT on analytics.dim_customers/dim_date/dim_products/dim_sellers (+ fact_sales after Stage 2 re-run)
+usage: analytics t, production f, raw f, staging f ; production SELECT as reader → permission denied
 ```
