@@ -20,7 +20,7 @@ extract_sales_csv ─┐
 extract_holidays_api ┘
 ```
 
-It does **not** yet contain `load_dimension_tables` or `refresh_fact_materialized_view` (Project 3's tasks), and `data_quality_check` only runs Project 2 checks (staging validation, freshness, staging-vs-production row counts, referential checks). The blueprint's full chain will be completed by Project 3. This truncation is deliberate and documented in [`docs/decisions.md`](docs/decisions.md) (item 5).
+It does **not** yet contain `load_dimension_tables` or `refresh_fact_materialized_view` (Project 3's tasks), and `data_quality_check` only runs Project 2 checks (staging validation, freshness, staging-vs-production row counts, referential checks) — specifically **not** the blueprint's delivery-consistency check or the `fact_sales`-vs-`production.order_items` row-count check, which both need Project 3 objects. The blueprint's full chain will be completed by Project 3. This truncation is deliberate and documented in [`docs/decisions.md`](docs/decisions.md) (item 5).
 
 ## Architecture
 
@@ -127,7 +127,7 @@ Verified: the 7-day window `2017-10-01…2017-10-07` was executed **twice**; all
 - Empty day `2016-01-01` via `dags test`: **7/7 tasks success, DagRun success** (quality gate passed with `errors: 0`).
 - API path: first 2016 run fetched **13 national holidays** from BrasilAPI → `raw.holidays` (load_year 2016) → staging → `production.holidays`; 2017 was already cached, so those 7 runs returned `None` without calling the API.
 - Protected Project 1 counts unchanged after every run: `orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`; `production.holidays = 26` (2016 + 2017, both legitimately loaded).
-- The DAG's metadata lives in a **separate** database (`airflow_metadata` container), never in the business database.
+- The DAG's metadata lives in a **separate** database (`airflow_metadata` container), never in the business database. That metadata database uses the default `airflow`/`airflow` credentials, which are local-dev only.
 
 ## Deliberate failure demonstration (blueprint §13)
 
