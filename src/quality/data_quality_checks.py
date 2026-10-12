@@ -126,3 +126,73 @@ def run_post_production_checks(conn, staging_df: pd.DataFrame, load_date: str) -
         errors.append(f"referential_orphan_sellers:{orphan_sellers}")
 
     return errors
+
+
+def run_analytics_checks(conn, schema: str = "analytics") -> list[str]:
+    errors = []
+    cur = conn.cursor()
+
+    cur.execute(
+        f"SELECT COUNT(*) FROM {schema}.fact_sales "
+        "WHERE order_delivered_date_key IS NULL "
+        "AND (delivery_time_days IS NOT NULL "
+        "OR delivery_delay_days IS NOT NULL "
+        "OR is_late IS NOT NULL)"
+    )
+    inconsistent = cur.fetchone()[0]
+    if inconsistent:
+        errors.append(f"analytics_delivery_consistency:{inconsistent}")
+
+    cur.execute(f"SELECT COUNT(*) FROM {schema}.fact_sales")
+    fact_rows = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM production.order_items")
+    prod_rows = cur.fetchone()[0]
+    if fact_rows != prod_rows:
+        errors.append(f"analytics_fact_vs_order_items:{fact_rows}!={prod_rows}")
+
+    for key_col, dim_table, dim_key in (
+        ("customer_key", "dim_customers", "customer_key"),
+        ("product_key", "dim_products", "product_key"),
+        ("seller_key", "dim_sellers", "seller_key"),
+    ):
+        cur.execute(
+            f"SELECT COUNT(*) FROM {schema}.fact_sales f "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {schema}.{dim_table} d "
+            f"WHERE d.{dim_key} = f.{key_col})"
+        )
+        orphans = cur.fetchone()[0]
+        if orphans:
+            errors.append(f"analytics_orphan_fact_{key_col}:{orphans}")
+
+    cur.execute(
+        f"SELECT COUNT(*) FROM {schema}.fact_sales "
+        "WHERE order_purchase_date_key IS NULL"
+    )
+    null_purchase = cur.fetchone()[0]
+    if null_purchase:
+        errors.append(f"analytics_null_purchase_date_key:{null_purchase}")
+
+    cur.execute(
+        f"SELECT COUNT(*) FROM {schema}.fact_sales "
+        "WHERE order_estimated_date_key IS NULL"
+    )
+    null_estimated = cur.fetchone()[0]
+    if null_estimated:
+        errors.append(f"analytics_null_estimated_date_key:{null_estimated}")
+
+    for key_col in (
+        "order_purchase_date_key",
+        "order_delivered_date_key",
+        "order_estimated_date_key",
+    ):
+        cur.execute(
+            f"SELECT COUNT(*) FROM {schema}.fact_sales f "
+            f"WHERE f.{key_col} IS NOT NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM {schema}.dim_date d "
+            f"WHERE d.date_key = f.{key_col})"
+        )
+        orphan_dates = cur.fetchone()[0]
+        if orphan_dates:
+            errors.append(f"analytics_orphan_fact_{key_col}:{orphan_dates}")
+
+    return errors
