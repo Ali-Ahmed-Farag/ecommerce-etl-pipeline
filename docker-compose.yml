@@ -31,6 +31,7 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-metadata:5432/airflow
       AIRFLOW_CONN_POSTGRES_BIZ: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5433/ecommerce
       AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+      ANALYTICS_SQL_DIR: ${ANALYTICS_SQL_DIR:-/opt/airflow/analytics_sql}
     ports:
       - "8080:8080"
     extra_hosts:
@@ -42,6 +43,7 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./tests:/opt/airflow/tests
+      - ../ecommerce-sales-dashboard/sql:/opt/airflow/analytics_sql:ro
     command: >
       bash -c "airflow db migrate &&
                (airflow scheduler & airflow webserver)"

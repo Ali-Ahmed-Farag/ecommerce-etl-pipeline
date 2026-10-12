@@ -161,7 +161,11 @@ def ecommerce_etl_pipeline():
     def data_quality_check(**context):
         import pandas as pd
         from load.load_raw import get_conn
-        from quality.data_quality_checks import run_post_production_checks, run_staging_checks
+        from quality.data_quality_checks import (
+            run_analytics_checks,
+            run_post_production_checks,
+            run_staging_checks,
+        )
 
         ds = context["ds"]
         conn = get_conn()
@@ -189,9 +193,32 @@ def ecommerce_etl_pipeline():
             stg_df["price"] = pd.to_numeric(stg_df["price"], errors="coerce")
             errors = run_staging_checks(stg_df)
             errors += run_post_production_checks(conn, stg_df, ds)
+            errors += run_analytics_checks(conn)
             if errors:
                 raise AirflowException(f"data quality gate failed: {errors}")
             return {"status": "passed", "errors": 0}
+        finally:
+            conn.close()
+
+    @task
+    def load_dimension_tables(**context):
+        from load.load_analytics import run_load_dimension_tables
+        from load.load_raw import get_conn
+
+        conn = get_conn()
+        try:
+            return run_load_dimension_tables(conn)
+        finally:
+            conn.close()
+
+    @task
+    def refresh_fact_materialized_view(**context):
+        from load.load_analytics import run_refresh_fact
+        from load.load_raw import get_conn
+
+        conn = get_conn()
+        try:
+            return run_refresh_fact(conn)
         finally:
             conn.close()
 
@@ -208,10 +235,12 @@ def ecommerce_etl_pipeline():
     raw_loaded = load_raw(sales, holidays)
     staged = clean_and_validate_staging()
     upserted = upsert_production()
+    dims = load_dimension_tables()
+    fact = refresh_fact_materialized_view()
     dq = data_quality_check()
     notify = notify_success()
 
-    raw_loaded >> staged >> upserted >> dq >> notify
+    raw_loaded >> staged >> upserted >> dims >> fact >> dq >> notify
 
 
 dag = ecommerce_etl_pipeline()
