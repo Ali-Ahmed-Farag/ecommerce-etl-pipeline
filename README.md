@@ -93,7 +93,7 @@ docker exec ecommerce_airflow airflow dags test ecommerce_etl_pipeline 2016-09-0
 docker exec ecommerce_airflow bash -c "cd /opt/airflow/tests && python -m pytest -q"
 ```
 
-`catchup=False` and `is_paused_upon_creation=True` are set in the DAG; the scheduler never fires runs on its own. Business logic uses `{{ ds }}` / the run's logical date, never the wall clock.
+`catchup=False` and `is_paused_upon_creation=True` are set in the DAG; the DAG is created paused with catchup=False, and if it is unpaused manually, the scheduler creates one run for the most recent interval only (this happened once by accident and the run was deleted). Business logic uses `{{ ds }}` / the run's logical date, never the wall clock.
 
 ## Data quality gate
 
@@ -141,7 +141,7 @@ Proven inside a **real DagRun** (not `dags test`, which never advances retries).
 - **Final state:** `load_raw` → `clean_and_validate_staging` → `upsert_production` → `data_quality_check` → `notify_success` all succeeded at attempt 1; **DagRun state `success`**, 7/7 tasks succeeded, run duration 369.86 s, final `try_number` of `extract_sales_csv` = **2**.
 - **No side effects:** Project 1 protected counts unchanged after the run — orders 99441, order_items 112650, payments 103886, reviews 99224 (the day's single order already existed; raw/staging each hold 1 row for `2016-09-05`).
 
-Attempt-by-attempt logs are in the repo (`git`-visible, `logs/` is gitignored): `logs/dag_id=ecommerce_etl_pipeline/run_id=backfill__2016-09-05…/task_id=extract_sales_csv/attempt=1.log` and `attempt=2.log`.
+The raw attempt logs live in the local `logs/` folder (gitignored, not pushed): `logs/dag_id=ecommerce_etl_pipeline/run_id=backfill__2016-09-05…/task_id=extract_sales_csv/attempt=1.log` and `attempt=2.log`. The screenshots in `docs/screenshots/` below are the published evidence of this run.
 
 ![Grid view of the successful backfill run](docs/screenshots/grid_success.png)
 *Grid view: run `backfill__2016-09-05T00:00:00+00:00` ended `success` at 05:55:42 UTC with all 7 tasks green (run duration 00:06:09).*
