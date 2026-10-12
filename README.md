@@ -93,7 +93,7 @@ docker exec ecommerce_airflow airflow dags test ecommerce_etl_pipeline 2016-09-0
 docker exec ecommerce_airflow bash -c "cd /opt/airflow/tests && python -m pytest -q"
 ```
 
-`catchup=False` and `is_paused_upon_creation=True` are set in the DAG; the DAG is created paused with catchup=False, and if it is unpaused manually, the scheduler creates one run for the most recent interval only (this happened once by accident and the run was deleted). Business logic uses `{{ ds }}` / the run's logical date, never the wall clock.
+`catchup=False` and `is_paused_upon_creation=True` are set in the DAG. The DAG was unpaused manually once by the author while browsing the UI (not by itself, not by an unknown source); the scheduler then created one run for the most recent interval only (`scheduled__2026-10-10T00:00:00+00:00`, no rows loaded, deleted), and the DAG was re-paused. Business logic uses `{{ ds }}` / the run's logical date, never the wall clock.
 
 ## Data quality gate
 
@@ -126,8 +126,9 @@ Verified: the 7-day window `2017-10-01…2017-10-07` was executed **twice**; all
 - Backfill `2017-01-01…2017-01-07` (4 empty days + 3 data days): 7/7 runs, **49/49 succeeded, 0 failed**; empty days land 0 rows, data days land 32/4/5 rows.
 - Empty day `2016-01-01` via `dags test`: **7/7 tasks success, DagRun success** (quality gate passed with `errors: 0`).
 - API path: first 2016 run fetched **13 national holidays** from BrasilAPI → `raw.holidays` (load_year 2016) → staging → `production.holidays`; 2017 was already cached, so those 7 runs returned `None` without calling the API.
-- Protected Project 1 counts unchanged after every run: `orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`; `production.holidays = 26` (2016 + 2017, both legitimately loaded).
+- Protected Project 1 counts unchanged after every run: `orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`; `production.holidays = 26` after those windows (2016 + 2017, both legitimately loaded; 39 after the full backfill below, with 2018 added).
 - The DAG's metadata lives in a **separate** database (`airflow_metadata` container), never in the business database. That metadata database uses the default `airflow`/`airflow` credentials, which are local-dev only.
+- Full backfill `2016-01-01…2018-12-31` (`airflow dags backfill -s 2016-01-01 -e 2018-12-31 ecommerce_etl_pipeline`): **1096 of 1096 runs success, 7672 tasks succeeded, 0 failed**, wall-clock 1 h 19 min 10 s; raw and staging hold **113,425 rows each**; `production.holidays = 39` (13 per year 2016–2018, `state` NULL on all 39); protected counts unchanged (`orders 99441`, `order_items 112650`, `payments 103886`, `reviews 99224`); DAG stayed paused; pre-existing successful runs were reused, no duplicates (1,096 runs / 1,096 distinct dates).
 
 ## Deliberate failure demonstration (blueprint §13)
 
