@@ -8,7 +8,7 @@ Part of a three-repo portfolio:
 |---|------|-------|
 | 1 | [ecommerce-database-design](https://github.com/Ali-Ahmed-Farag/ecommerce-database-design) | PostgreSQL design + one-time historical seed for Olist (orders, items, payments, reviews, customers…) |
 | 2 | **this repo** | Airflow ETL pipeline (CSV + API) that upserts into Project 1's `production` schema |
-| 3 | **ecommerce-sales-dashboard** | Star schema, `fact_sales` materialized view, Power BI manual pack (repo URL to be added) |
+| 3 | [ecommerce-sales-dashboard](https://github.com/Ali-Ahmed-Farag/ecommerce-sales-dashboard) | Star schema, `fact_sales` materialized view, Power BI manual pack |
 
 ## Scope boundary (read this first)
 
